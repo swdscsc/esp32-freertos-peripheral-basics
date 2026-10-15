@@ -1,75 +1,63 @@
-# ESP32 外设驱动与 FreeRTOS 多任务基础实践
+# ESP32 FreeRTOS 外设基础教程
 
-ESP32-S3 嵌入式开发的三个递进模块：**GPIO 点灯 → 按键检测 → FreeRTOS 多任务**。
-每个模块都是可独立编译的完整 ESP-IDF 工程。
+一套**循序渐进**的 ESP32（ESP-IDF）外设与 FreeRTOS 示例集合：从点亮一颗 LED，到 GPIO 中断、UART、I2C、ADC、PWM、定时器，再到多任务调度与综合项目。每个示例都是**独立可编译的 ESP-IDF 工程**，代码即文档，适合作为嵌入式入门与面试作品。
 
-| 模块 | 内容 | 关键知识点 |
-| --- | --- | --- |
-| `02-led` | GPIO 输出控制 LED 闪烁 | `gpio_set_level`、延时节奏控制 |
-| `03-key` | 按键扫描 + 电平翻转控制 LED | GPIO 输入、消抖、状态翻转 |
-| `04-freertos` | **两个独立任务并发运行** | `xTaskCreate`、任务优先级与栈大小、任务间并发 |
+## 学习路径
 
-## 模块 3：FreeRTOS 多任务（`04-freertos/main/main.c`）
-
-把「按键扫描」和「LED 闪烁」拆成两个互不阻塞的独立任务：
-
-```c
-// 任务1：按键扫描，按下时输出 hello world
-void key_task(void *arg)
-{
-    uint8_t key;
-    while (1) {
-        key = key_scan();
-        if (key == 1) printf("hello world\n");
-        vTaskDelay(pdMS_TO_TICKS(10));      // 主动让出 CPU
-    }
-}
-
-// 任务2：LED 以 500ms 周期闪烁
-void led_task(void *arg)
-{
-    while (1) {
-        gpio_set_level(GPIO_NUM_1, 0);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        gpio_set_level(GPIO_NUM_1, 1);
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-}
-
-void app_main(void)
-{
-    led_init();
-    key_init();
-    xTaskCreate(key_task, "key_task", 4096, NULL, 1, NULL);
-    xTaskCreate(led_task, "led_task", 4096, NULL, 1, NULL);
-}
+```mermaid
+graph TD
+    A[01-blink<br/>GPIO 输出] --> B[02-button<br/>GPIO 输入+中断+消抖]
+    B --> C[03-uart<br/>串口回显]
+    B --> D[04-i2c<br/>I2C 读传感器]
+    D --> E[05-adc<br/>模数采样]
+    E --> F[06-pwm<br/>LED 呼吸灯]
+    F --> G[07-timer<br/>高精度定时器]
+    G --> H[08-freertos<br/>任务/队列/互斥量]
+    B --> I[09-capstone<br/>按键→队列→UART 上报]
 ```
 
-**要点**：
-- 两个 `while(1)` 死循环能"同时"运行，靠的是 FreeRTOS 的任务调度
-- 每个任务循环里必须调用 `vTaskDelay()` 主动让出 CPU，否则低优先级任务会饿死
-- 任务的栈大小（4096 字节）和优先级（1）需要根据实际负载调整
+## 目录
 
-## 编译
+| 示例 | 主题 | 关键 API |
+|---|---|---|
+| `01-blink` | GPIO 输出翻转 | `gpio_set_direction` / `gpio_set_level` |
+| `02-button` | GPIO 输入 + 下降沿中断 + 队列 + 软件消抖 | `gpio_isr_handler_add` / `xQueueSendFromISR` |
+| `03-uart` | UART0 回显 | `uart_driver_install` / `uart_read_bytes` |
+| `04-i2c` | I2C 主机读寄存器（以 QMI8658 为例） | `i2c_master_bus_add_device` / `i2c_master_transmit_receive` |
+| `05-adc` | 单次 ADC 采样 | `adc_oneshot_new_unit` / `adc_oneshot_read` |
+| `06-pwm` | LEDC 呼吸灯 | `ledc_timer_config` / `ledc_set_duty` |
+| `07-timer` | esp_timer 周期回调 | `esp_timer_create` / `esp_timer_start_periodic` |
+| `08-freertos` | 生产者/消费者（队列 + 互斥量） | `xTaskCreate` / `xQueueCreate` / `xSemaphoreCreateMutex` |
+| `09-capstone` | 综合：按键 → 队列 → 任务 → UART 上报 | 整合 02 + 03 |
 
-进入任一模块目录：
+## 环境与构建
 
 ```bash
-cd 04-freertos
-idf.py set-target esp32s3
-idf.py build
-idf.py -p COMx flash monitor
+# 1. 安装 ESP-IDF 并激活环境（Linux/macOS）
+. $HOME/esp/esp-idf/export.sh
+
+# 2. 进入任一示例目录编译、烧录、监视
+cd 08-freertos
+idf.py set-target esp32s3      # 或 esp32 / esp32c3
+idf.py build flash monitor
 ```
 
-## 与其他仓库的关系
+> 引脚为示例默认值（LED=GPIO2、按键=GPIO0、I2C=SDA21/SCL22），实际板子请按原理图修改宏定义。
 
-这三个模块是后续综合项目的基础组件：
+## 设计要点（面试可讲）
 
-- 综合应用 → [`esp32-qmi8658-attitude-monitor`](https://github.com/)（姿态采集 + LVGL 显示）
-- 联网 → [`esp32-wifi-station`](https://github.com/)（WiFi STA + 事件组）
+1. **中断上下文安全**：GPIO 中断里只做最小动作（向队列发令牌），真正的处理放到任务里，避免 ISR 中执行耗时逻辑——这是 RTOS 的通用范式。
+2. **消抖**：硬件中断 + 任务内 50ms 延时再判电平，简单可靠；进阶可用定时器队列 `timer_create` 做更精准消抖。
+3. **队列解耦**：`08-freertos` 用队列在任务间传递数据、用互斥量保护共享资源（打印），体现了多任务系统的核心同步手段。
+4. **外设驱动分层**：ESP-IDF v5 的 I2C 使用 `i2c_master_bus` / `i2c_master_dev` 新 API，比旧 `i2c_param_config` 更清晰，示例已对齐新接口。
 
----
+## 扩展方向
+
+- `02-button` 改用 `esp_timer` 做硬件级消抖
+- `04-i2c` 接入真实 IMU（如 QMI8658）做姿态解算
+- `08-freertos` 引入 `EventGroup` / `Task Notification` 替代队列
+- `09-capstone` 增加 LCD 显示与上位机协议
 
 ## License
 
-MIT
+[MIT](LICENSE)
